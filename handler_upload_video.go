@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
@@ -105,7 +109,24 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "Unable to generate random hex", err)
 		return
 	}
-	fileKey := randomHex.String() + ".mp4"
+
+	// Update the handlerUploadVideo to get the aspect ratio of the video file from the temporary file once it's saved to disk.
+	// Depending on the aspect ratio, add a "landscape", "portrait", or "other" prefix to the key before uploading it to S3.
+	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to get video aspect ratio", err)
+		return
+	}
+	prefix := "other"
+	switch aspectRatio {
+	case "16:9":
+		prefix = "landscape"
+	case "9:16":
+		prefix = "portrait"
+	}
+
+	// fileKey := randomHex.String() + ".mp4" // without prefix
+	fileKey := prefix + "/" + randomHex.String() + ".mp4" // with prefix
 
 	// Put the object into S3 using PutObject
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
@@ -129,4 +150,49 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	respondWithJSON(w, http.StatusOK, video)
+}
+
+// Create a function getVideoAspectRatio(filePath string) (string, error) that takes a file path and returns the aspect ratio as a string.
+func getVideoAspectRatio(filePath string) (string, error) {
+	// It should use exec.Command to run the same ffprobe command as above. In this case, the command is ffprobe and the arguments are -v, error, -print_format, json, -show_streams, and the file path:
+	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
+
+	// Set the resulting exec.Cmd's Stdout field to a pointer to a new bytes.Buffer:
+	cmd.Stdout = &bytes.Buffer{}
+
+	// .Run() the command:
+	err := cmd.Run()
+	if err != nil {
+		return "", err
+	}
+
+	// Unmarshal the stdout of the command from the buffer's .Bytes into a JSON struct so that you can get the width and height fields:
+	streams := struct {
+		Streams []struct {
+			Width  int `json:"width"`
+			Height int `json:"height"`
+		} `json:"streams"`
+	}{}
+	err = json.Unmarshal(cmd.Stdout.(*bytes.Buffer).Bytes(), &streams)
+	if err != nil {
+		return "", err
+	}
+	if len(streams.Streams) == 0 {
+		return "", fmt.Errorf("no streams found")
+	}
+
+	// I did a bit of math to determine the ratio, then returned one of three strings: 16:9, 9:16, or other.
+	// Aspect ratios might be slightly off due to rounding errors. You can use a tolerance range (or just use integer division and call it a day).
+
+	width := streams.Streams[0].Width
+	height := streams.Streams[0].Height
+	tolerance := 0.01
+	ratio := float64(width) / float64(height)
+	if ratio > 16.0/9.0-tolerance && ratio < 16.0/9.0+tolerance {
+		return "16:9", nil
+	}
+	if ratio > 9.0/16.0-tolerance && ratio < 9.0/16.0+tolerance {
+		return "9:16", nil
+	}
+	return "other", nil
 }
