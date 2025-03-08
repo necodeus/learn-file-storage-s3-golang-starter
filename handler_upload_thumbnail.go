@@ -83,7 +83,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	path = "/" + path
+	path = fmt.Sprintf("http://%s/%s", r.Host, path)
 	video.ThumbnailURL = &path
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
