@@ -110,9 +110,25 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Update handlerUploadVideo to create a processed version of the video. Upload the processed video to S3, and discard the original.
+	processedFilePath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to process video for fast start", err)
+		return
+	}
+	defer os.Remove(processedFilePath)
+
+	// Open the processed file
+	processedFile, err := os.Open(processedFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to open processed file", err)
+		return
+	}
+	defer processedFile.Close()
+
 	// Update the handlerUploadVideo to get the aspect ratio of the video file from the temporary file once it's saved to disk.
 	// Depending on the aspect ratio, add a "landscape", "portrait", or "other" prefix to the key before uploading it to S3.
-	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
+	aspectRatio, err := getVideoAspectRatio(processedFile.Name())
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to get video aspect ratio", err)
 		return
@@ -132,7 +148,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         &fileKey,
-		Body:        tempFile,
+		Body:        processedFile,
 		ContentType: &mediaType,
 	})
 	if err != nil {
@@ -195,4 +211,23 @@ func getVideoAspectRatio(filePath string) (string, error) {
 		return "9:16", nil
 	}
 	return "other", nil
+}
+
+// Create a new function called processVideoForFastStart(filePath string) (string, error) that takes a file path as input and creates and returns a new path to a file with "fast start" encoding.
+func processVideoForFastStart(filePath string) (string, error) {
+	// Create a new string for the output file path. I just appended .processing to the input file (which should be the path to the temp file on disk)
+	outputPath := filePath + ".processing"
+
+	// Create a new exec.Cmd using exec.Command
+	// The command is ffmpeg and the arguments are -i, the input file path, -c, copy, -movflags, faststart, -f, mp4 and the output file path.
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4", outputPath)
+
+	// Run the command with .Run()
+	err := cmd.Run()
+	if err != nil {
+		return "", err
+	}
+
+	// Return the output file path
+	return outputPath, nil
 }
