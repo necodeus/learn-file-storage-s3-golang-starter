@@ -1,10 +1,11 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -32,14 +33,10 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
 
-	// Parse the form data
-	// Set a const maxMemory to 10MB. I just bit-shifted the number 10 to the left 20 times to get an int that stores the proper number of bytes.
 	const maxMemory = 10 << 20
 
-	// Use (http.Request).ParseMultipartForm with the maxMemory const as an argument
 	r.ParseMultipartForm(maxMemory)
 
-	// Use r.FormFile to get the file data. The key the web browser is using is called "thumbnail"
 	file, header, err := r.FormFile("thumbnail")
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Unable to parse form file", err)
@@ -47,34 +44,37 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 	defer file.Close()
 
-	// Get the media type from the file's Content-Type header
 	mediaType := header.Header.Get("Content-Type")
+	fileExtension := mediaType[6:]
 
-	// Read all the image data into a byte slice using io.ReadAll
-	data, err := io.ReadAll(file)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Unable to read file", err)
-		return
-	}
-
-	// Get the video's metadata from the SQLite database. The apiConfig's db has a GetVideo method you can use
 	video, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to get video", err)
 		return
 	}
-	// If the authenticated user is not the video owner, return a http.StatusUnauthorized response
 	if video.UserID != userID {
 		respondWithError(w, http.StatusUnauthorized, "User is not the video owner", nil)
 		return
 	}
 
-	// Use base64.StdEncoding.EncodeToString from the encoding/base64 package to convert the image data to a base64 string.
-	// Create a data URL with the media type and base64 encoded image data. The format is:
-	// data:<media-type>;base64,<data>
-	thumbnailBase64 := base64.StdEncoding.EncodeToString(data)
-	thumbnailURL := fmt.Sprintf("data:%s;base64,%s", mediaType, thumbnailBase64)
-	video.ThumbnailURL = &thumbnailURL
+	path := filepath.Join(cfg.assetsRoot, fmt.Sprintf("%s.%s", videoID, fileExtension))
+	thumbnailFile, err := os.Create(path)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to create thumbnail file", err)
+		return
+	}
+	defer thumbnailFile.Close()
+
+	fmt.Println("saving thumbnail to", path)
+
+	_, err = io.Copy(thumbnailFile, file)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to write thumbnail file", err)
+		return
+	}
+
+	path = "/" + path
+	video.ThumbnailURL = &path
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to update video", err)
